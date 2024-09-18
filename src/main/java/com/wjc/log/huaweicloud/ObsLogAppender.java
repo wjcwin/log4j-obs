@@ -124,7 +124,7 @@ public class ObsLogAppender extends AbstractAppender {
 
             String message = new String(getLayout().toByteArray(event), StandardCharsets.UTF_8);
             mesBuffer.add(message);
-            // 缓存了50条数据或者 超过20s后，就向 obs写日志，否则不写
+            // 缓存了100条数据或者 超过20s后，就向 obs写日志，否则不写
             if (mesBuffer.size() >= 100 || flushTime <= System.currentTimeMillis() - 20 * 1000) {
                 flushMes();
             }
