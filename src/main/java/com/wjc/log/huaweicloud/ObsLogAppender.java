@@ -32,6 +32,10 @@ import java.util.concurrent.locks.ReentrantLock;
 public class ObsLogAppender extends AbstractAppender {
     protected static final org.apache.logging.log4j.Logger LOGGER = StatusLogger.getLogger();
 
+    // 缓冲刷新阈值
+    private static final int BUFFER_SIZE_THRESHOLD = 100;
+    private static final long FLUSH_INTERVAL_MS = 20 * 1000;
+
     private final String bucketName;
     private final String logPath;
     private final Long maxFileSize;
@@ -75,15 +79,19 @@ public class ObsLogAppender extends AbstractAppender {
         this.preFix = preFix;
         this.maxBackupIndex = maxBackupIndex;
         this.obsClient = new ObsClient(accessKeyId, secretAccessKey, endpoint);
-        this.jobPath = System.getenv("FLINK_JOB_NAME");
+        String flinkJobName = System.getenv("FLINK_JOB_NAME");
+        if (flinkJobName == null || flinkJobName.isEmpty()) {
+            flinkJobName = "unknown-job";
+            LOGGER.warn("环境变量 FLINK_JOB_NAME 未设置，使用默认值: unknown-job");
+        }
+        this.jobPath = flinkJobName;
         this.historyLogFileName = new ArrayBlockingQueue<String>(2 * maxBackupIndex);
-        this.logPath = logPath + "/" + jobPath + "/" + hostname + "_" + ipAddress;
+        String dateStr = currentDateStr();
+        this.logPath = logPath + "/" + jobPath + "/" + hostname + "_" + ipAddress + "_" + dateStr;
         logFileName =
                 this.logPath
                         + "/"
                         + this.preFix
-                        + "_"
-                        + currentDateStr()
                         + "_"
                         + (nextFileIndex - 1)
                         + ".log";
@@ -109,6 +117,14 @@ public class ObsLogAppender extends AbstractAppender {
         if (!mesBuffer.isEmpty()) {
             flushMes();
         }
+        if (obsClient != null) {
+            try {
+                obsClient.close();
+                LOGGER.info("ObsClient 已关闭");
+            } catch (Exception e) {
+                LOGGER.error("关闭 ObsClient 失败", e);
+            }
+        }
         return super.stop(timeout, timeUnit);
     }
 
@@ -124,8 +140,8 @@ public class ObsLogAppender extends AbstractAppender {
 
             String message = new String(getLayout().toByteArray(event), StandardCharsets.UTF_8);
             mesBuffer.add(message);
-            // 缓存了100条数据或者 超过20s后，就向 obs写日志，否则不写
-            if (mesBuffer.size() >= 100 || flushTime <= System.currentTimeMillis() - 20 * 1000) {
+            // 缓存了阈值数量数据或超过刷新间隔后，就向 obs 写日志
+            if (mesBuffer.size() >= BUFFER_SIZE_THRESHOLD || flushTime <= System.currentTimeMillis() - FLUSH_INTERVAL_MS) {
                 flushMes();
             }
         } finally {
@@ -134,7 +150,7 @@ public class ObsLogAppender extends AbstractAppender {
     }
 
     public void flushMes() {
-        final byte[] messageBytes = messageJoin(mesBuffer, "\n").getBytes(StandardCharsets.UTF_8);
+        final byte[] messageBytes = String.join("\n", mesBuffer).getBytes(StandardCharsets.UTF_8);
         ByteArrayInputStream inputStream = new ByteArrayInputStream(messageBytes);
         // 通过获取对象属性接口获取下次追加上传的位置
         // 追加上传
@@ -151,14 +167,6 @@ public class ObsLogAppender extends AbstractAppender {
             // 写入失败，日志提醒
             LOGGER.error("缓存日志刷写obs失败，查看上面重试日志");
         }
-    }
-
-    public String messageJoin(ArrayList<String> al, String split) {
-        final StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < al.size(); i++) {
-            sb.append(al.get(i));
-        }
-        return sb.toString();
     }
 
     // 追加写，成功 true，失败 false
@@ -189,8 +197,7 @@ public class ObsLogAppender extends AbstractAppender {
                     logFileSize = logFileSize + inputSize;
                     return true;
                 } catch (ObsException ex) {
-                    LOGGER.error("第 " + attempt + " 次重试失败：" + e.getMessage());
-                    ex.printStackTrace();
+                    LOGGER.error("第 {} 次重试失败: {}", attempt, ex.getMessage(), ex);
                 }
             }
         }
@@ -222,7 +229,7 @@ public class ObsLogAppender extends AbstractAppender {
             }
         }
         // 将日志文件转为 最新 rolling文件
-        logFileName = logPath + "/" + preFix + "_" + currentDateStr() + "_" + nextFileIndex + ".log";
+        logFileName = logPath + "/" + preFix + "_" + nextFileIndex + ".log";
         nextFileIndex++;
         createNewLogFile();
     }
